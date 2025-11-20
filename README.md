@@ -64,6 +64,12 @@ To run the tracking algorithm over the S02 scenario run:
 python main.py --ConfigPath ./config/config.yaml  
 ```
 
+**Visualize**
+To visualize the results (e.g.):
+
+```
+python visualize_tracks.py --scene S01 --camera c001 --results results\S01\prueba.txt --dataset-root datasets\AIC19 --out results\S01\c001_viz.mp4
+```
 
 
 # Citation
