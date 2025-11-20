@@ -13,23 +13,9 @@ The repository has been tested in the following software.
 * Anaconda
 * Pycharm
 
-**Anaconda environment**
-
-To create and setup the Anaconda Envirmorent run the following terminal command from the repository folder:
-```
-$ conda env create -f env_MTMC.yaml
-$ conda activate env_MTMC
-```
-
-**Clone repository**
-
-```
-$ git clone https://github.com/elun15/Online-MTMC-vehicle-tracking.git
-```
-
 **Download AIC19 dataset**
 
-The dataset can be downloaded at https://www.aicitychallenge.org/track1-download/
+The dataset can be downloaded at https://drive.google.com/file/d/13wNJpS_Oaoe-7y5Dzexg_Ol7bKu1OWuC/view
 
 **Prepare AIC19 dataset**
 
@@ -38,7 +24,7 @@ Move the downloaded folders *aic19-track1-mtmc/train* and *aic19-track1-mtmc/tes
 Preprocess the data to extract the images from the .avi files by running:
 
 ```
-python preprocess_data.py
+python preprocessing_data\preprocess_data.py   
 ```
 
 
