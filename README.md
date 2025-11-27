@@ -41,6 +41,15 @@ Place the weights file under *./models/*
 
 Training details can be found in the paper.
 
+**Training Re-id<Beta version>**
+
+Gen Crops:
+python prepare_reid_dataset.py --dataset-root datasets/AIC19 --set train --out datasets_reid --val-ratio 0.1 --min-area 500
+
+Train Re-id:
+python train_reid.py --data datasets_reid --out models/reid_finetune.pth.tar --epochs 80 --batch-size 32 --lr 0.1 --workers 4
+
+python train_reid.py --data datasets_reid --out models/reid_finetune.pth.tar --epochs 120 --batch-size 32 --lr 0.1 --workers 4 --pretrained models/reid_finetune.pth.tar --resume
 
 **Running**
 
@@ -55,6 +64,8 @@ To visualize the results (e.g.):
 
 ```
 python visualize_tracks.py --scene S01 --camera c001 --results results\S01\prueba.txt --dataset-root datasets\AIC19 --out results\S01\c001_viz.mp4
+
+python visualize_tracks.py --scene S01 --camera c001 --results results\S01\prueba.txt --dataset-root datasets\AIC19 --out results\S01\c001_viz.mp4 --use-imgs
 ```
 
 

@@ -1,9 +1,6 @@
 import argparse, os, cv2
 from collections import defaultdict
 
-#  python visualize_tracks.py --video datasets\AIC19\test\S01\c001\c001.avi --tracks results\S01\prueba.txt --camera c001 --out results\S01\c001_viz.mp4
-# python visualize_tracks.py --scene S01 --camera c001 --results results\S01\prueba.txt --dataset-root datasets\AIC19 --out results\S01\c001_viz.mp4
-
 def parse_args():
     ap = argparse.ArgumentParser("Visualize MTMC results (format: id_cam id frame x y w h -1 -1)")
     ap.add_argument("--scene", required=True, help="e.g. S01")
@@ -14,6 +11,8 @@ def parse_args():
                          "e.g. datasets\\AIC19 or datasets\\AIC19\\aic19-track1-mtmc")
     ap.add_argument("--out", required=True, help="Output video path, e.g. results\\S01\\c001_viz.mp4")
     ap.add_argument("--offset", type=float, default=0.0, help="Time offset in seconds for synchronization (default 0).")
+    ap.add_argument("--frame-offset", type=int, default=0, help="Integer frame offset to add to video frame index when looking up tracks (default 0).")
+    ap.add_argument("--use-imgs", action='store_true', help="Use image frames from dataset (test/.../img) instead of .avi.")
     ap.add_argument("--score-th", type=float, default=-1.0, help="Ignored here (for compatibility).")
     ap.add_argument("--resize", type=float, default=1.0, help="Resize factor for output video.")
     ap.add_argument("--font-scale", type=float, default=0.8)
@@ -26,7 +25,6 @@ def color_for_id(tid: int):
     return (rnd.randint(64, 255), rnd.randint(64, 255), rnd.randint(64, 255))
 
 def clamp_box(x, y, w, h, W, H):
-    # clip bbox into frame; avoid negatives
     x = max(0, int(round(x)))
     y = max(0, int(round(y)))
     w = max(0, int(round(w)))
@@ -36,12 +34,6 @@ def clamp_box(x, y, w, h, W, H):
     return x, y, w, h
 
 def load_tracks_mtmc(path, cam_num):
-    """
-    Parse file lines of format:
-    id_cam id frame x y w h -1 -1
-    Keep only lines where id_cam == cam_num.
-    Returns: dict frame_idx -> list[(tid, x, y, w, h)]
-    """
     per_frame = defaultdict(list)
     bad, kept = 0, 0
     with open(path, "r", encoding="utf-8") as f:
@@ -86,16 +78,67 @@ def find_video_path(root, scene, camera):
             return os.path.join(cam_dir, fn)
     return None
 
+def find_img_dir(root, scene, camera):
+    cam_dir = os.path.join(root, "test", scene, camera)
+    img_dir = os.path.join(cam_dir, "img")
+    if os.path.isdir(img_dir):
+        return img_dir
+    # some datasets may store frames directly under camera folder
+    return cam_dir if any(fn.lower().endswith(('.jpg','.png')) for fn in os.listdir(cam_dir)) else None
+
 def main():
     args = parse_args()
     cam_num = int(args.camera[-3:])
-
     tracks = load_tracks_mtmc(args.results, cam_num)
 
+    # If using images, iterate over image files in sorted order and use their numeric names as frame index
+    if args.use_imgs:
+        img_dir = find_img_dir(args.dataset_root, args.scene, args.camera)
+        if img_dir is None:
+            raise SystemExit(f"Cannot find img directory under test/{args.scene}/{args.camera}")
+        img_files = sorted([fn for fn in os.listdir(img_dir) if fn.lower().endswith(('.jpg','.png'))])
+        if not img_files:
+            raise SystemExit(f"No image files found in {img_dir}")
+        # prepare writer using first image for size
+        first_img = cv2.imread(os.path.join(img_dir, img_files[0]))
+        if first_img is None:
+            raise SystemExit("Cannot read first image for video size.")
+        H, W = first_img.shape[:2]
+        os.makedirs(os.path.dirname(args.out), exist_ok=True)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v") if args.out.lower().endswith(".mp4") else cv2.VideoWriter_fourcc(*"XVID")
+        writer = cv2.VideoWriter(args.out, fourcc, 25.0, (W, H))  # fps arbitrary for img->video
+
+        written = 0
+        for fn in img_files:
+            # frame index extracted from filename (e.g. 000049.jpg -> 49)
+            name, _ = os.path.splitext(fn)
+            try:
+                frame_idx = int(name)
+            except ValueError:
+                # fallback sequential
+                frame_idx = written + 1
+            img = cv2.imread(os.path.join(img_dir, fn))
+            if img is None:
+                continue
+            for (tid, x, y, w, h) in tracks.get(frame_idx, []):
+                pt1 = (int(round(x)), int(round(y)))
+                pt2 = (int(round(x + w)), int(round(y + h)))
+                color = color_for_id(tid)
+                cv2.rectangle(img, pt1, pt2, color, args.thickness)
+                cv2.putText(img, f"ID {tid}", (pt1[0], max(0, pt1[1] - 5)),
+                            cv2.FONT_HERSHEY_SIMPLEX, args.font_scale, color, max(1, args.thickness-1), cv2.LINE_AA)
+            cv2.putText(img, f"{args.scene} {args.camera} frame {frame_idx}", (10, 25),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            writer.write(img)
+            written += 1
+        writer.release()
+        print(f"Saved visualization from images: {args.out} (frames written: {written})")
+        return
+
+    # Otherwise use video file (.avi)
     vid_path = find_video_path(args.dataset_root, args.scene, args.camera)
     if vid_path is None:
         raise SystemExit(f"Cannot find video under test/{args.scene}/{args.camera}.")
-
     cap = cv2.VideoCapture(vid_path)
     if not cap.isOpened():
         raise SystemExit(f"Cannot open video: {vid_path}.")
@@ -107,16 +150,17 @@ def main():
     fourcc = cv2.VideoWriter_fourcc(*"mp4v") if args.out.lower().endswith(".mp4") else cv2.VideoWriter_fourcc(*"XVID")
     writer = cv2.VideoWriter(args.out, fourcc, fps, (W, H))
 
-    # Apply `offset` (convert seconds to frame)
-    offset_frames = int(round(args.offset * fps))  # frame_shift based on offset seconds
+    # offset in seconds -> frames to add to video frame index when querying tracks
+    offset_frames = int(round(args.offset * fps))
+    frame_offset = int(args.frame_offset)  # integer frame offset to ADD
 
     frame_idx, written = 0, 0
     while True:
         ok, frame = cap.read()
         if not ok: break
         frame_idx += 1
-
-        for (tid, x, y, w, h) in tracks.get(frame_idx - offset_frames, []):
+        lookup_frame = frame_idx + offset_frames + frame_offset
+        for (tid, x, y, w, h) in tracks.get(lookup_frame, []):
             pt1 = (int(round(x)), int(round(y)))
             pt2 = (int(round(x + w)), int(round(y + h)))
             color = color_for_id(tid)
@@ -130,7 +174,6 @@ def main():
 
     writer.release()
     cap.release()
-
     print(f"Saved visualization: {args.out} (frames written: {written})")
 
 if __name__ == "__main__":

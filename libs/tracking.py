@@ -42,33 +42,69 @@ class tracking():
         return {'id': [], 'xw': [], 'yw': [], 'det': []}
 
     def create_new_tracks_KF(self, clusters):
-        centroids_xw = [clusters[item]['xw'] for item in self.unmatched_clusters]
-        centroids_yw = [clusters[item]['yw'] for item in self.unmatched_clusters]
+    # Debug-safe version: prints internal state and guards exceptions
+        try:
+            print("DEBUG create_new_tracks_KF: unmatched_clusters =", self.unmatched_clusters)
+            if not isinstance(clusters, (list, tuple)):
+                print("DEBUG create_new_tracks_KF: clusters is not a list/tuple:", type(clusters))
+                return
 
-        num_centroids = len(centroids_xw)
-        centroids = np.zeros((num_centroids, 2))
-        if num_centroids > 0:
-            centroids[:, 0] = centroids_xw
-            centroids[:, 1] = centroids_yw
+            # Build centroids for unmatched clusters
+            centroids_xw = [clusters[item]['xw'] for item in self.unmatched_clusters] if len(self.unmatched_clusters) > 0 else []
+            centroids_yw = [clusters[item]['yw'] for item in self.unmatched_clusters] if len(self.unmatched_clusters) > 0 else []
 
-        for i in range(len(self.unmatched_clusters)):
-            centroid = centroids[i, :]
-            kalman_filter = KalmanFilter(dim_x=4, dim_z=2)
-            dt = 1.
-            kalman_filter.F = np.array([[1, dt, 0, 0],
-                                        [0, 1, 0, 0],
-                                        [0, 0, 1, dt],
-                                        [0, 0, 0, 1]])
-            q = Q_discrete_white_noise(dim=2, dt=dt, var=0.05)
-            kalman_filter.Q = block_diag(q, q)
-            kalman_filter.x = np.array([[centroid[0], 0, centroid[1], 0]]).T
-            kalman_filter.H = np.array([[1, 0, 0, 0],
-                                        [0, 0, 1, 0]])
-            kalman_filter.R = np.array([[5, 0],
-                                        [0, 5]])
-            kalman_filter.P *= 500.
-            self.tracks_KF.append(self.new_track(self.id_track, centroid, kalman_filter, self.unmatched_clusters[i]))
-            self.id_track += 1
+            num_centroids = len(centroids_xw)
+            print(f"DEBUG create_new_tracks_KF: num_centroids = {num_centroids}")
+
+            centroids = np.zeros((num_centroids, 2))
+            if num_centroids > 0:
+                centroids[:, 0] = centroids_xw
+                centroids[:, 1] = centroids_yw
+
+            for idx_in_unmatched in range(len(self.unmatched_clusters)):
+                try:
+                    centroid = centroids[idx_in_unmatched, :]
+                except Exception as e:
+                    print("DEBUG create_new_tracks_KF: failed to read centroid at", idx_in_unmatched, "error:", e)
+                    continue
+
+                cluster_idx = int(self.unmatched_clusters[idx_in_unmatched])
+                # quick sanity: cluster should exist
+                if cluster_idx < 0 or cluster_idx >= len(clusters):
+                    print("DEBUG create_new_tracks_KF: cluster_idx out of range:", cluster_idx)
+                    continue
+
+                # Try to append (no reuse logic here) — keep this simple for debug
+                try:
+                    kalman_filter = KalmanFilter(dim_x=4, dim_z=2)
+                    dt = 1.
+                    kalman_filter.F = np.array([[1, dt, 0, 0],
+                                                [0, 1, 0, 0],
+                                                [0, 0, 1, dt],
+                                                [0, 0, 0, 1]])
+                    q = Q_discrete_white_noise(dim=2, dt=dt, var=0.05)
+                    kalman_filter.Q = block_diag(q, q)
+                    kalman_filter.x = np.array([[centroid[0], 0, centroid[1], 0]]).T
+                    kalman_filter.H = np.array([[1, 0, 0, 0],
+                                                [0, 0, 1, 0]])
+                    kalman_filter.R = np.array([[5, 0],
+                                                [0, 5]])
+                    kalman_filter.P *= 500.
+
+                    new_trk = self.new_track(self.id_track, centroid, kalman_filter, cluster_idx)
+                    # debug: check new_trk shape/keys
+                    print(f"DEBUG create_new_tracks_KF: creating track id={self.id_track}, centroid={centroid}, cluster_idx={cluster_idx}")
+                    self.tracks_KF.append(new_trk)
+                    self.id_track += 1
+                except Exception as e:
+                    print("DEBUG create_new_tracks_KF: error while creating appending track for cluster", cluster_idx, "error:", e)
+                    continue
+
+            print("DEBUG create_new_tracks_KF: after creation, num tracks =", len(self.tracks_KF))
+        except Exception as e_outer:
+            print("DEBUG create_new_tracks_KF: outer exception:", e_outer)
+            # don't crash the main loop
+            return
 
     def predict_new_locations(self):
         for trk in self.tracks_KF:
@@ -83,7 +119,11 @@ class tracking():
                                     pos_cluster_to_remove):
         self.unmatched_tracks, self.unmatched_clusters = [], []
 
-        self.matches = list(linear_sum_assignment(cost))
+        # linear_sum_assignment trả về hai mảng (row_ind, col_ind)
+        row_ind, col_ind = linear_sum_assignment(cost)
+        self.matches = [np.asarray(row_ind, dtype=np.int64), np.asarray(col_ind, dtype=np.int64)]
+
+        # tracks unassigned / clusters unassigned wrt the HA (high-association) indexes
         tracks_unassigned_HA = []
         clusters_unassigned_HA = []
 
@@ -95,37 +135,51 @@ class tracking():
             if c not in self.matches[1]:
                 clusters_unassigned_HA.append(np.int64(c))
 
-        # Update clusters
+        # Update clusters: map matched HA indices back to real cluster positions
         clusters_assigned_HA = self.matches[1]
         ids_clusters_assigned_HA = ids_cluster_HA[clusters_assigned_HA]
-        real_pos_clusters_matched = np.squeeze(np.array([np.where(clusters_id == id)[0] for id in ids_clusters_assigned_HA]))
-        self.matches[1] = real_pos_clusters_matched
+        # produce array of real positions (one per matched HA index)
+        real_pos_clusters_matched = []
+        for cid in ids_clusters_assigned_HA:
+            idxs = np.where(clusters_id == cid)[0]
+            if idxs.size > 0:
+                real_pos_clusters_matched.append(np.int64(idxs[0]))
+        self.matches[1] = np.asarray(real_pos_clusters_matched, dtype=np.int64)
 
+        # Unassigned clusters: map and collect first match if exists
         ids_clusters_unassigned_HA = ids_cluster_HA[clusters_unassigned_HA]
-        real_pos_clusters_unmatched = [np.where(clusters_id == id)[0] for id in ids_clusters_unassigned_HA]
-        self.unmatched_clusters.clear()
-        for i in real_pos_clusters_unmatched:
-            if len(i) > 0:
-                self.unmatched_clusters.append(np.int64(i[0]))
+        real_pos_clusters_unmatched = []
+        for cid in ids_clusters_unassigned_HA:
+            idxs = np.where(clusters_id == cid)[0]
+            if idxs.size > 0:
+                real_pos_clusters_unmatched.append(np.int64(idxs[0]))
+        self.unmatched_clusters = list(real_pos_clusters_unmatched)
 
-        # Update tracks
+        # Update tracks: map matched HA indices back to real track positions
         tracks_assigned_HA = self.matches[0]
         ids_tracks_assigned_HA = ids_track_HA[tracks_assigned_HA]
-        real_pos_tracks_matched = np.squeeze(np.array([np.where(tracks_id == id)[0] for id in ids_tracks_assigned_HA]))
-        self.matches[0] = real_pos_tracks_matched
+        real_pos_tracks_matched = []
+        for tid in ids_tracks_assigned_HA:
+            idxs = np.where(tracks_id == tid)[0]
+            if idxs.size > 0:
+                real_pos_tracks_matched.append(np.int64(idxs[0]))
+        self.matches[0] = np.asarray(real_pos_tracks_matched, dtype=np.int64)
 
+        # Unassigned tracks: map and collect
         ids_tracks_unassigned_HA = ids_track_HA[tracks_unassigned_HA]
-        real_pos_tracks_unmatched = [np.where(tracks_id == id)[0] for id in ids_tracks_unassigned_HA]
-        self.unmatched_tracks.clear()
-        for i in real_pos_tracks_unmatched:
-            if len(i) > 0:
-                self.unmatched_tracks.append(np.int64(i[0]))
+        real_pos_tracks_unmatched = []
+        for tid in ids_tracks_unassigned_HA:
+            idxs = np.where(tracks_id == tid)[0]
+            if idxs.size > 0:
+                real_pos_tracks_unmatched.append(np.int64(idxs[0]))
+        self.unmatched_tracks = list(real_pos_tracks_unmatched)
 
         # Add filtered removals
         for i in pos_track_to_remove:
             self.unmatched_tracks.append(np.int64(i))
         for i in pos_cluster_to_remove:
             self.unmatched_clusters.append(np.int64(i))
+
 
     def cluster_track_assignment(self, clusters, display):
         # Ép về float 1D để tránh shape (N,1)
@@ -169,19 +223,33 @@ class tracking():
                                              pos_track_to_remove, pos_cluster_HA, ids_cluster_HA, clusters_id,
                                              pos_cluster_to_remove)
         else:
-            self.matches = []
+            # đảm bảo matches luôn là hai mảng 1-D (rỗng nếu không có)
+            self.matches = [np.array([], dtype=np.int64), np.array([], dtype=np.int64)]
             if num_clusters == 0:
                 self.unmatched_clusters = []
-                self.unmatched_tracks = np.arange(num_tracks)
+                self.unmatched_tracks = list(np.arange(num_tracks, dtype=np.int64))
             if num_tracks == 0:
                 self.unmatched_tracks = []
-                self.unmatched_clusters = np.arange(num_clusters)
+                self.unmatched_clusters = list(np.arange(num_clusters, dtype=np.int64))
+
 
     def update_assigned_tracks(self, clusters):
-        num_matched_tracks = 0 if not self.matches else len(self.matches[0])
+        # đảm bảo self.matches[0] luôn là array (rỗng nếu không có)
+        if not self.matches or not isinstance(self.matches, (list, tuple)):
+            num_matched_tracks = 0
+        else:
+            m0 = self.matches[0]
+            # nếu scalar, coi là 1 match
+            if not hasattr(m0, '__len__'):
+                num_matched_tracks = 1
+                m0 = np.asarray([m0], dtype=np.int64)
+                self.matches[0] = m0
+            else:
+                num_matched_tracks = len(m0)
+
         for i in range(num_matched_tracks):
-            track_id = self.matches[0][i]
-            cluster_id = self.matches[1][i]
+            track_id = int(self.matches[0][i])
+            cluster_id = int(self.matches[1][i])
             z = np.array([clusters[cluster_id]['xw'], clusters[cluster_id]['yw']], dtype=float)
             self.tracks_KF[track_id]['kalmanFilter'].update(z)
             # Cập nhật lại xw, yw dạng float sau update
@@ -278,7 +346,7 @@ class tracking():
             totalVisibleCounts = np.array([trk['totalVisibleCount'] for trk in self.tracks_KF])
             visibility = totalVisibleCounts / ages
             consecutiveInvisibleCount = np.array([trk['consecutiveInvisibleCount'] for trk in self.tracks_KF])
-            lostInds = np.bitwise_or(np.bitwise_and(ages < age_threshold, visibility < 0.6),
+            lostInds = np.bitwise_or(np.bitwise_and(ages < age_threshold, visibility < 0.5),
                                      consecutiveInvisibleCount >= invisible_for_too_long)
             self.tracks_KF = [trk for idx, trk in enumerate(self.tracks_KF) if not lostInds[idx]]
 

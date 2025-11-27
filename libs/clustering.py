@@ -1,10 +1,3 @@
-'''l
-################################
-#         Spatial
-              Clustering       #
-################################
-'''
-
 import numpy as np
 from scipy.cluster import hierarchy
 from thirdparty import sklearn_dunn
@@ -49,60 +42,116 @@ class clustering():
 
 
     def compute_clusters(self, distance_matrix, association_matrix):
-        # flat_tril = np.ravel((np.tril(distance_matrix)), order='F')
-        # vec_dist_features = flat_tril[flat_tril != 0]
-        num_det_f= distance_matrix.shape[0]
-        # iu1 = np.triu_indices(num_det_f)
-        #
-        # distance_matrix2 = np.copy(distance_matrix)
-        # distance_matrix2[iu1] = np.inf
-        # flat_tril = np.ravel(distance_matrix2, order='F')
-        # vec_dist_features = flat_tril[flat_tril != np.inf]
-        #
-        # Z = hierarchy.linkage(vec_dist_features, method='complete', metric='euclidean')
-        # plt.figure()
-        # dn = hierarchy.dendrogram(Z)
-        # plt.show()
+        """
+        Robust computation of clusters:
+         - sanitize distance_matrix (replace inf/nan with large finite values, set diagonal = 0)
+         - try agglomerative clustering for k in [min_num_clusters, max_num_clusters]
+         - compute Dunn index (sklearn_dunn.dunn), allow that dunn may return NaN
+         - choose optimal number of clusters robustly:
+             * if derivative of indices is usable, use argmax of derivative (np.nanargmax)
+             * otherwise fallback to argmax of indices (best Dunn), or fallback to smallest cluster count
+        Returns: idx_clusters (labels for each detection), optimal_clusters (int)
+        """
 
-        max_num_clusters = num_det_f - 1
-        min_num_clusters = max((num_det_f - (np.where(association_matrix == 1))[0].__len__() + 1), 2)
+        # Ensure numpy array float
+        distance_matrix = np.array(distance_matrix, dtype=float)
+        num_det_f = distance_matrix.shape[0]
 
-
-        if min_num_clusters > max_num_clusters:  #It can occur when there are some pairs of close detections being from the same cameras by pairs
-
-            optimal_clusters = num_det_f
-            idx_clusters = np.array(range(0, optimal_clusters))
-
-        else:
-
-            clusters = np.array(range(min_num_clusters, max_num_clusters + 1))
-            num_clusters = (max_num_clusters - min_num_clusters + 1)
-
-            labels = list()
-            indices = np.zeros(num_clusters)
-
-            for k in range(num_clusters):
-
-                # Metodo 1
-                #  labels.append(hierarchy.fcluster(Z, clusters[k], criterion='maxclust'))
-
-                # Metodo 2
-                cluster = AgglomerativeClustering(n_clusters=clusters[k], metric='precomputed', linkage='complete')
-                labels.append(cluster.fit_predict(distance_matrix))
-
-
-                indices[k] = sklearn_dunn.dunn(labels[-1], distance_matrix)
-
-            # max_index = indices.tolist().index(min(indices))
-
-            if indices.__len__() == 1:  # If min_num_clusters == max_num_clusters
-                optimal_clusters = clusters[0]
-                idx_clusters = labels[0] # -1 so clusters labels start in 0
+        # Sanitize distance matrix: replace nan/inf with large finite values
+        if not np.isfinite(distance_matrix).all():
+            finite_mask = np.isfinite(distance_matrix)
+            if np.any(finite_mask):
+                max_finite = np.nanmax(distance_matrix[finite_mask])
+                if not np.isfinite(max_finite):
+                    max_finite = 1.0
             else:
-                derivative = np.diff(indices)
-                pos = derivative.tolist().index(max(derivative)) + 1
-                optimal_clusters = clusters[pos]
-                idx_clusters = labels[pos]  # -1 so clusters labels start in 0
+                max_finite = 1.0
+            # replace NaN/Inf with a large value (so clustering treats them as far apart)
+            distance_matrix[~finite_mask] = max_finite * 10.0
+
+        # ensure diagonal is zero (distance to self)
+        np.fill_diagonal(distance_matrix, 0.0)
+
+        # determine range of clusters to try
+        max_num_clusters = max(1, num_det_f - 1)
+        # association_matrix assumed to have shape (N,N), compute how many associations are 1
+        assoc_ones = 0
+        if association_matrix is not None:
+            try:
+                assoc_ones = np.sum(association_matrix == 1)
+            except Exception:
+                assoc_ones = 0
+        min_num_clusters = max((num_det_f - assoc_ones + 1), 2)
+        min_num_clusters = int(min(min_num_clusters, max_num_clusters))  # clamp
+
+        # trivial cases
+        if num_det_f <= 1:
+            # nothing to cluster
+            idx_clusters = np.zeros(num_det_f, dtype=int)
+            optimal_clusters = num_det_f
+            return idx_clusters, optimal_clusters
+
+        if min_num_clusters > max_num_clusters:
+            # fallback: every detection is its own cluster
+            optimal_clusters = num_det_f
+            idx_clusters = np.arange(num_det_f)
+            return idx_clusters, optimal_clusters
+
+        clusters_range = np.arange(min_num_clusters, max_num_clusters + 1)
+        num_clusters = clusters_range.size
+
+        labels = []
+        indices = np.full(num_clusters, np.nan, dtype=float)
+
+        for k_idx, k in enumerate(clusters_range):
+            try:
+                # AgglomerativeClustering with precomputed distances
+                # sklearn API: metric / affinity change across versions; using metric='precomputed' as before
+                clusterer = AgglomerativeClustering(n_clusters=int(k), metric='precomputed', linkage='complete')
+                lab = clusterer.fit_predict(distance_matrix)
+                labels.append(lab)
+                # compute Dunn index; dunn may return NaN in degenerate cases
+                indices[k_idx] = sklearn_dunn.dunn(lab, distance_matrix)
+            except Exception as e:
+                # on any failure, keep NaN and continue
+                labels.append(np.zeros(num_det_f, dtype=int))
+                indices[k_idx] = np.nan
+
+        # If only a single tested cluster count, just return it
+        if num_clusters == 1:
+            optimal_clusters = int(clusters_range[0])
+            idx_clusters = labels[0]
+            return idx_clusters, optimal_clusters
+
+        # compute derivative of indices and select best position robustly
+        with np.errstate(invalid='ignore'):  # ignore warnings from nan operations
+            derivative = np.diff(indices)  # length num_clusters-1, may contain NaN
+
+        # choose pos based on derivative if possible, otherwise fallback to best Dunn index
+        pos = None
+        try:
+            # if derivative contains valid numbers, use argmax ignoring NaNs
+            if derivative.size > 0 and not np.all(np.isnan(derivative)):
+                pos = int(np.nanargmax(derivative)) + 1
+            else:
+                # derivative invalid -> fallback to Dunn index argmax
+                if not np.all(np.isnan(indices)):
+                    pos = int(np.nanargmax(indices))
+                else:
+                    # everything NaN: fallback to smallest number of clusters
+                    pos = 0
+        except Exception:
+            # safest fallback
+            pos = 0
+
+        # clamp pos
+        pos = int(max(0, min(pos, num_clusters - 1)))
+
+        optimal_clusters = int(clusters_range[pos])
+        idx_clusters = labels[pos] if pos < len(labels) else labels[0]
+
+        # ensure idx_clusters is numpy array of ints
+        idx_clusters = np.asarray(idx_clusters, dtype=int)
 
         return idx_clusters, optimal_clusters
 

@@ -47,17 +47,14 @@ class mtmc():
                           'S03': 2422,
                           'S04': 710,
                           'S05': 4299,
+                          'S06': 2000,
                           }
-# 'S01': {'c001': 0,
-#                                'c002': 1.640,
-#                                'c003': 2.049,
-#                                'c004': 2.177,
-#                                'c005': 2.235}
+                        
         self.offset = {'S01': {'c001': 0,
-                               'c002': 0,
-                               'c003': 0,
-                               'c004': 0,
-                               'c005': 0},
+                                'c002': 1.640,
+                                'c003': 2.049,
+                                'c004': 2.177,
+                                'c005': 2.235},
                        'S02': {'c006': 0,
                                'c007': 0.061,
                                'c008': 0.421,
@@ -111,7 +108,13 @@ class mtmc():
                                'c033': 0,
                                'c034': 0,
                                'c035': 0,
-                               'c036': 0}}
+                               'c036': 0},
+                        'S06':{ 'c041': 0,
+                                'c042': 0,
+                                'c043': 0,
+                                'c044': 0,
+                                'c045': 0,
+                                'c046': 0 }}
 
         self.colors = colors.distinguishable_colors()
 
@@ -161,6 +164,7 @@ if __name__ == '__main__':
     if CONFIG['MODEL'] == "Imagenet":
         # Features model pretrined
         net = resnet_elg.resnet50(pretrained=True)
+        print('Using model Imagenet!!!')
 
     else:
         model = CONFIG['MODEL']
@@ -398,7 +402,7 @@ if __name__ == '__main__':
                         clust.clusters_frame[-1]['det'][-1]['id_global'] = int(idx_det)
 
 
-                        # clust.clusters_frame[-1]['det'][-1]['features'] = sct_f['features'][idx_det]
+                        clust.clusters_frame[-1]['det'][-1]['features'] = sct_f['features'][idx_det]
 
 
 
@@ -407,6 +411,10 @@ if __name__ == '__main__':
             track.predict_new_locations()
 
             track.cluster_track_assignment(clust.clusters_frame, 1)
+            # debug prints (chèn tạm)
+            print(f"Frame {f}: num_tracks={len(track.tracks_KF)}, num_clusters={len(clust.clusters_frame)}")
+            for i, trk in enumerate(track.tracks_KF):
+                print(f" TRACK_IDX[{i}] id={trk['id']} pos=({trk['xw']:.3f},{trk['yw']:.3f}) age={trk['age']} inv={trk['consecutiveInvisibleCount']} from={trk['fromcluster']}")
 
             # Update each assigned track with the corresponding detection.It calls the correct method of vision.KalmanFilter to correct the location estimate.
             #  Next, it stores the new bounding box, and increases the age of the track and the total  visible count by 1.
